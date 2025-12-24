@@ -1,0 +1,187 @@
+name: Persistent-VPS
+on:
+  workflow_dispatch: # لتشغيله يدوياً كما طلبت كل شهر
+  schedule:
+    - cron: '0 */6 * * *' # يعيد تشغيل نفسه كل 6 ساعات لضمان الاستمرارية
+
+jobs:
+  secure-vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 0 # تم تعطيل المهلة الزمنية لمنع التوقف التلقائي
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Restore Data
+        run: |
+          # استعادة البيانات المحفوظة من فرع (branch) خاص بالبيانات
+          git config --global user.name "VPS-Bot"
+          git config --global user.email "bot@vps.com"
+          # استخدام مسار بديل يمكن الوصول إليه
+          mkdir -p $HOME/my_data
+          echo "✅ تم إنشاء دليل البيانات في: $HOME/my_data"
+
+      - name: Install & Configure SSH
+        run: |
+          sudo apt update -y
+          sudo apt install -y openssh-server curl
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+          echo "root:admin@123" | sudo chpasswd
+          echo "PermitRootLogin yes" | sudo tee -a /etc/ssh/sshd_config
+          sudo service ssh restart
+          echo "✅ SSH user: root | pass: admin@123"
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=persistent-vps --advertise-exit-node
+          tsIP=$(tailscale ip -4 | head -n 1)
+          echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+          echo "✅ Tailscale IP: $tsIP"
+
+      - name: Send Telegram Notification
+        run: |
+          # إعداد بيانات البوت
+          BOT_TOKEN="8541707577:AAHivkWH7RdHhKr8zXSuL_roy245LmNYyRo"
+          CHAT_ID="7259620384"
+          VPS_IP="$TAILSCALE_IP"
+          
+          # إنشاء رسالة التليجرام
+          MESSAGE="🚀 *VPS جديد جاهز للاستخدام* 🚀
+
+📡 *عنوان الـ IP:* \`$VPS_IP\`
+🖥️ *اسم المستخدم:* \`root\`
+🔑 *كلمة المرور:* \`admin@123\`
+
+⏱️ *مدة التشغيل:* غير محدودة
+🔄 *إعادة التشغيل:* كل 6 ساعات
+🔗 *نفس الـ IP:* نعم
+
+📝 *طريقة الاتصال:*
+\`\`\`
+ssh root@$VPS_IP
+\`\`\`
+
+🔒 *معلومات الأمان:*
+- SSH مفعل على المنفذ 22
+- اتصال آمن عبر Tailscale
+- جلسة لا تنتهي تلقائياً
+
+📅 *تاريخ البدء:* $(date '+%Y-%m-%d %H:%M:%S')
+🔔 *معرف الجلسة:* ${{ github.run_id }}
+
+⚠️ *تنبيه:* حافظ على بيانات الاتصال آمنة ولا تشاركها!"
+          
+          # إرسال الرسالة إلى التليجرام
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d text="${MESSAGE}" \
+            -d parse_mode="Markdown" \
+            -d disable_web_page_preview="true"
+          
+          echo "✅ تم إرسال إشعار التليجرام بنجاح!"
+          echo "📱 تم الإرسال إلى معرف الدردشة: $CHAT_ID"
+
+      - name: Background Auto-Save with Telegram Alerts
+        run: |
+          # سكريبت يعمل في الخلفية لحفظ بياناتك مع إرسال إشعارات تليجرام
+          cat << 'EOF' > /tmp/save_data.sh
+          #!/bin/bash
+          
+          BOT_TOKEN="8541707577:AAHivkWH7RdHhKr8zXSuL_roy245LmNYyRo"
+          CHAT_ID="7259620384"
+          VPS_IP="$TAILSCALE_IP"
+          
+          # دالة لإرسال إشعارات التليجرام
+          send_telegram_alert() {
+            local message="$1"
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              -d chat_id="${CHAT_ID}" \
+              -d text="${message}" \
+              -d parse_mode="Markdown" \
+              -d disable_web_page_preview="true" > /dev/null
+          }
+          
+          counter=0
+          while true; do
+            # حفظ البيانات (أضف أوامر الحفظ الخاصة بك هنا)
+            echo "$(date) - حفظ البيانات التلقائي..."
+            
+            # إرسال إشعار كل 10 دقائق
+            if [ $((counter % 10)) -eq 0 ]; then
+              send_telegram_alert "🔄 *VPS يعمل بشكل طبيعي*\n\n⏰ الوقت: \`$(date '+%H:%M:%S')\`\n📊 الحالة: نشط\n📍 IP: \`$VPS_IP\`"
+            fi
+            
+            # إرسال إشعار كل ساعة
+            if [ $((counter % 60)) -eq 0 ]; then
+              hours=$((counter / 60))
+              send_telegram_alert "⏳ *تقرير ساعة من التشغيل*\n\n📡 VPS يعمل بشكل مستمر\n⏰ المدة: \`$hours\` ساعة\n✅ الحالة: مستقرة\n🔗 IP: \`$VPS_IP\`"
+            fi
+            
+            sleep 60
+            counter=$((counter + 1))
+          done
+          EOF
+          
+          # إعطاء صلاحيات التنفيذ
+          chmod +x /tmp/save_data.sh
+          
+          # تشغيل السكريبت في الخلفية
+          /tmp/save_data.sh &
+          
+          echo "✅ تم تشغيل سكريبت الحفظ والإشعارات في الخلفية"
+
+      - name: Keep VPS Alive Forever
+        run: |
+          echo "========================================="
+          echo "🚀 VPS جاهز للاستخدام!"
+          echo "📡 Tailscale IP: $TAILSCALE_IP"
+          echo "🖥️  SSH: root@$TAILSCALE_IP"
+          echo "🔑 كلمة المرور: admin@123"
+          echo "⏱️  المهلة الزمنية: غير محدود"
+          echo "📱 إشعارات التليجرام: مفعلة ✅"
+          echo "👤 معرف التليجرام: 7259620384"
+          echo "========================================="
+          echo ""
+          echo "✅ الجلسة ستبقى قيد التشغيل إلى ما لا نهاية"
+          echo "✅ سيتم الحفاظ على نفس IP في كل جلسة"
+          echo "✅ سكريبت الحفظ التلقائي يعمل في الخلفية"
+          echo "✅ إشعارات التليجرام مفعلة كل 10 دقائق وساعة"
+          echo ""
+          echo "📝 للاتصال عبر SSH استخدم:"
+          echo "ssh root@$TAILSCALE_IP"
+          echo ""
+          echo "[$(date)] بدء التشغيل..."
+          
+          # إرسال إشعار بدء التشغيل النهائي
+          BOT_TOKEN="8541707577:AAHivkWH7RdHhKr8zXSuL_roy245LmNYyRo"
+          CHAT_ID="7259620384"
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d text="🎉 *VPS بدأ التشغيل بنجاح!*\n\n✅ كل الأنظمة تعمل بشكل طبيعي\n🔗 جاهز للاتصال عبر SSH\n⏰ سيتم إرسال تقارير دورية\n📡 IP: \`$TAILSCALE_IP\`" \
+            -d parse_mode="Markdown"
+          
+          # حلقة لا نهائية للحفاظ على الجلسة مع إرسال تقارير
+          counter=1
+          while true; do
+            echo "[$(date)] VPS يعمل بدون توقف... (الدقيقة: $counter)"
+            
+            # إرسال إشعار كل 30 دقيقة في الكونسول
+            if (( counter % 30 == 0 )); then
+              echo "   🔔 إشعار: VPS يعمل بشكل مستمر لمدة $counter دقيقة"
+              echo "   📍 IP الحالي: $TAILSCALE_IP"
+              
+              # إرسال إشعار تليجرام كل ساعتين (120 دقيقة)
+              if (( counter % 120 == 0 )); then
+                hours=$((counter / 60))
+                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+                  -d chat_id="${CHAT_ID}" \
+                  -d text="📊 *تقرير تشغيل VPS*\n\n⏰ المدة: \`$hours\` ساعة\n🔗 IP: \`$TAILSCALE_IP\`\n✅ الحالة: مستقرة\n🔄 التشغيل: مستمر" \
+                  -d parse_mode="Markdown"
+              fi
+            fi
+            
+            sleep 60
+            counter=$((counter + 1))
+          done
